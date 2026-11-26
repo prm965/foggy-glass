@@ -13,7 +13,8 @@
   html, body { margin:0; height:100%; background:#0b1118; overflow:hidden; touch-action:none;
     -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
     font-family:'Poppins',system-ui,-apple-system,sans-serif; color:var(--ink); }
-  canvas#view { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  canvas#bg, canvas#view, canvas#fx { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  canvas#bg { z-index:0; } canvas#view { z-index:1; } canvas#fx { z-index:2; pointer-events:none; }
   video#cam { position:fixed; width:2px; height:2px; opacity:0; pointer-events:none; }
   svg.i { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; flex:none; }
 
@@ -52,7 +53,9 @@
 </style>
 </head>
 <body>
+<canvas id="bg"></canvas>
 <canvas id="view"></canvas>
+<canvas id="fx"></canvas>
 <video id="cam" playsinline muted></video>
 
 <svg width="0" height="0" style="position:absolute">
@@ -111,7 +114,7 @@ const fog = document.createElement('canvas'), fctx = fog.getContext('2d');
 const tmp = document.createElement('canvas'), tctx = tmp.getContext('2d');
 const small = document.createElement('canvas'), sctx = small.getContext('2d');
 const grain = document.createElement('canvas'), gctx = grain.getContext('2d');
-let W = 0, H = 0, fW = 0, fH = 0;
+let W = 0, H = 0, fW = 0, fH = 0, decorOn = false;
 
 (function makeGrain() {
   grain.width = 256; grain.height = 256;
@@ -130,6 +133,7 @@ function resize() {
   fH = fog.height = tmp.height = Math.max(64, Math.round(H * FS));
   small.width = Math.max(10, Math.round(W / 55));
   small.height = Math.max(10, Math.round(H / 55));
+  if (decorOn) buildDecor();
 }
 window.addEventListener('resize', resize);
 resize();
@@ -150,6 +154,85 @@ function drawVideo(ctx, w, h) {
 function toScreen(lm) {
   const { vw, vh, s, ox, oy } = coverParams(W, H);
   return { x: W - (ox + lm.x * vw * s), y: oy + lm.y * vh * s };
+}
+
+// ---------- vintage surround: walnut wood + brass bezel (drawn once, no per-frame cost) ----------
+const bg = $('#bg'), bgx = bg.getContext('2d'), fx = $('#fx'), fxx = fx.getContext('2d');
+function videoRect() {
+  const { vw, vh, s } = coverParams(W, H);
+  const rw = vw * s, rh = vh * s;
+  return { x: (W - rw) / 2, y: (H - rh) / 2, w: rw, h: rh };
+}
+function rr(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function buildDecor() {
+  bg.width = fx.width = W; bg.height = fx.height = H;
+  const g = bgx, R = videoRect();
+  // walnut planks with wavy grain
+  g.fillStyle = '#2b190e'; g.fillRect(0, 0, W, H);
+  const planks = Math.max(3, Math.round(W / 260)), pw = W / planks;
+  for (let i = 0; i < planks; i++) {
+    const x0 = i * pw, tone = Math.random() * 0.16 - 0.04;
+    g.fillStyle = tone > 0 ? `rgba(120,70,30,${tone})` : `rgba(0,0,0,${-tone * 2})`;
+    g.fillRect(x0, 0, pw, H);
+    g.save(); g.beginPath(); g.rect(x0, 0, pw, H); g.clip();
+    for (let y = -4; y < H; y += 2) {
+      g.strokeStyle = Math.random() < 0.6 ? `rgba(15,6,2,${0.05 + Math.random() * 0.12})` : `rgba(200,140,80,${0.03 + Math.random() * 0.06})`;
+      g.lineWidth = 0.6 + Math.random() * 1.6;
+      const ph = Math.random() * 6.28, amp = 1 + Math.random() * 4, fr = 0.004 + Math.random() * 0.006;
+      g.beginPath(); g.moveTo(x0, y);
+      for (let x = x0; x <= x0 + pw + 16; x += 16) g.lineTo(x, y + Math.sin(x * fr + ph + y * 0.015) * amp + Math.sin(x * 0.0013 + i) * 6);
+      g.stroke();
+    }
+    g.restore();
+    if (i > 0) { g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(x0 - 1, 0, 2, H); g.fillStyle = 'rgba(255,210,150,.07)'; g.fillRect(x0 + 1, 0, 1, H); }
+  }
+  // fine pores, warm top light, vignette
+  const n = document.createElement('canvas'); n.width = n.height = 160;
+  const nx = n.getContext('2d'), id = nx.createImageData(160, 160);
+  for (let k = 0; k < id.data.length; k += 4) { const v = Math.random() * 60; id.data[k] = v; id.data[k + 1] = v * 0.6; id.data[k + 2] = v * 0.3; id.data[k + 3] = Math.random() * 38; }
+  nx.putImageData(id, 0, 0); g.fillStyle = g.createPattern(n, 'repeat'); g.fillRect(0, 0, W, H);
+  const vg = g.createRadialGradient(W / 2, H * 0.45, Math.min(W, H) * 0.2, W / 2, H / 2, Math.max(W, H) * 0.75);
+  vg.addColorStop(0, 'rgba(255,190,110,.10)'); vg.addColorStop(1, 'rgba(0,0,0,.6)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  // brass bezel around the glass
+  const T = Math.max(10, Math.round(Math.min(W, H) * 0.02));
+  const ox = R.x - T, oy = R.y - T, ow = R.w + 2 * T, oh = R.h + 2 * T;
+  g.save(); g.shadowColor = 'rgba(0,0,0,.7)'; g.shadowBlur = T * 2.2; g.shadowOffsetY = T * 0.6;
+  const br = g.createLinearGradient(ox, oy, ox + ow, oy + oh);
+  [[0, '#f0d896'], [.2, '#b08a3e'], [.45, '#ecd08a'], [.7, '#7c5d24'], [1, '#d1ad62']].forEach(([o, c]) => br.addColorStop(o, c));
+  g.fillStyle = br; rr(g, ox, oy, ow, oh, T * 0.9); g.fill(); g.restore();
+  g.save(); rr(g, ox, oy, ow, oh, T * 0.9); g.rect(R.x, R.y, R.w, R.h); g.clip('evenodd');   // brushed-metal grain
+  for (let y = oy; y < oy + oh; y += 2) { g.fillStyle = `rgba(${Math.random() < 0.5 ? '0,0,0' : '255,240,200'},${Math.random() * 0.07})`; g.fillRect(ox, y, ow, 1); }
+  g.restore();
+  rr(g, ox + .75, oy + .75, ow - 1.5, oh - 1.5, T * 0.9); g.strokeStyle = 'rgba(255,240,190,.55)'; g.lineWidth = 1.5; g.stroke();
+  g.strokeStyle = 'rgba(0,0,0,.75)'; g.lineWidth = 3; g.strokeRect(R.x - 1.5, R.y - 1.5, R.w + 3, R.h + 3);
+  if (T >= 12) {                                                                               // corner screws
+    const sr = T * 0.2;
+    [[ox + T / 2, oy + T / 2], [ox + ow - T / 2, oy + T / 2], [ox + T / 2, oy + oh - T / 2], [ox + ow - T / 2, oy + oh - T / 2]].forEach(([cx, cy], k) => {
+      const sg = g.createRadialGradient(cx - sr * .3, cy - sr * .3, 0, cx, cy, sr); sg.addColorStop(0, '#f4e3b0'); sg.addColorStop(1, '#6b4e1c');
+      g.fillStyle = sg; g.beginPath(); g.arc(cx, cy, sr, 0, 6.283); g.fill();
+      const a = k * 1.1 + 0.4; g.strokeStyle = 'rgba(30,18,6,.8)'; g.lineWidth = 1; g.beginPath();
+      g.moveTo(cx - Math.cos(a) * sr * .8, cy - Math.sin(a) * sr * .8); g.lineTo(cx + Math.cos(a) * sr * .8, cy + Math.sin(a) * sr * .8); g.stroke();
+    });
+  }
+  // glass overlay: soft inner shadow + corner reflection (sits above the video)
+  const f = fxx; f.clearRect(0, 0, W, H); f.save(); f.beginPath(); f.rect(R.x, R.y, R.w, R.h); f.clip();
+  const E = Math.min(R.w, R.h) * 0.05;
+  const edge = (x0, y0, x1, y1, rx, ry, rw, rh) => {
+    const lg = f.createLinearGradient(x0, y0, x1, y1); lg.addColorStop(0, 'rgba(0,0,0,.38)'); lg.addColorStop(1, 'rgba(0,0,0,0)');
+    f.fillStyle = lg; f.fillRect(rx, ry, rw, rh);
+  };
+  edge(R.x, R.y, R.x, R.y + E, R.x, R.y, R.w, E);
+  edge(R.x, R.y + R.h, R.x, R.y + R.h - E, R.x, R.y + R.h - E, R.w, E);
+  edge(R.x, R.y, R.x + E, R.y, R.x, R.y, E, R.h);
+  edge(R.x + R.w, R.y, R.x + R.w - E, R.y, R.x + R.w - E, R.y, E, R.h);
+  const rg = f.createLinearGradient(R.x, R.y, R.x + R.w * .5, R.y + R.h * .5); rg.addColorStop(0, 'rgba(255,255,255,.07)'); rg.addColorStop(1, 'rgba(255,255,255,0)');
+  f.fillStyle = rg; f.beginPath(); f.moveTo(R.x, R.y); f.lineTo(R.x + R.w * .62, R.y); f.lineTo(R.x, R.y + R.h * .5); f.closePath(); f.fill();
+  f.restore();
 }
 
 // ---------- models ----------
@@ -333,7 +416,7 @@ function loop() {
   tctx.fillRect(0, 0, fW, fH);
   tctx.globalCompositeOperation = 'destination-in';
   tctx.drawImage(fog, 0, 0);
-  vctx.drawImage(tmp, 0, 0, W, H);
+  { const R = videoRect(); vctx.save(); vctx.beginPath(); vctx.rect(R.x, R.y, R.w, R.h); vctx.clip(); vctx.drawImage(tmp, 0, 0, W, H); vctx.restore(); }
 
   if (handInfo && handInfo.mode !== 'none') {
     vctx.strokeStyle = 'rgba(255,255,255,.8)'; vctx.lineWidth = 1.5;
@@ -368,6 +451,7 @@ $('#go').onclick = async () => {
     });
     video.srcObject = stream;
     await video.play();
+    decorOn = true; buildDecor();
     $('#start').style.display = 'none';
     setHidden(hudHidden);
     $('#msg').style.display = 'block';
@@ -415,7 +499,7 @@ addEventListener('resize', () => {                      // keep a moved panel on
     hud.style.top = Math.max(0, Math.min(window.innerHeight - r.height, r.top)) + 'px';
   }
 });
-$('#fit').onclick = () => { fitMode = !fitMode; };
+$('#fit').onclick = () => { fitMode = !fitMode; buildDecor(); };
 $('#fogAll').onclick = () => { fctx.globalCompositeOperation = 'source-over'; fctx.fillStyle = 'rgba(238,245,255,0.9)'; fctx.fillRect(0, 0, fW, fH); };
 $('#clear').onclick = () => { fctx.clearRect(0, 0, fW, fH); };
 $('#snap').onclick = () => { const a = document.createElement('a'); a.download = 'foggy-glass.png'; a.href = view.toDataURL('image/png'); a.click(); };
