@@ -76,7 +76,7 @@
 
 <div id="hud" style="display:none">
   <div class="chip" title="Breath"><svg class="i"><use href="#i-wind"/></svg><div class="meter" id="mMouth"><i></i></div></div>
-  <div class="chip" title="Microphone"><svg class="i"><use href="#i-mic"/></svg><div class="meter" id="mMic"><i></i></div></div>
+  <div class="chip" title="Microphone (adds strength)"><svg class="i"><use href="#i-mic"/></svg><div class="meter" id="mMic"><i></i></div></div>
   <div class="chip" title="Sensitivity"><svg class="i"><use href="#i-sliders"/></svg><input id="sens" type="range" min="0" max="100" value="60"></div>
   <div class="sep"></div>
   <button class="btn" id="fogAll" title="Fog everything"><svg class="i"><use href="#i-cloud"/></svg></button>
@@ -218,7 +218,7 @@ function puff(x, y, level) {
 }
 
 // ---------- main loop ----------
-let frame = 0, blow = 0;
+let frame = 0, blow = 0, mouthOn = false;
 function loop() {
   requestAnimationFrame(loop);
   if (video.readyState < 2) return;
@@ -238,19 +238,20 @@ function loop() {
     try { readFace(face.detectForVideo(video, now + 0.01)); } catch (e) {}
   }
 
-  const thr = 0.55 - sens * 0.4;
-  const faceBlow = Math.max(0, Math.min(1, (mouthScore - thr) / 0.25));
-  $('#mMouth i').style.width = Math.min(100, mouthScore / Math.max(0.05, thr * 2) * 100) + '%';
-  const micBlow = readMic(sens);
-  const target = spaceDown ? 1 : Math.max(faceBlow, micBlow);
+  // Fog only when a face is found AND the mouth is open or pursed.
+  const thr = 0.6 - sens * 0.4;                         // slider 60% → 0.36
+  if (!mouth) mouthOn = false;
+  else if (!mouthOn && mouthScore > thr) mouthOn = true;           // turn on above threshold
+  else if (mouthOn && mouthScore < thr * 0.8) mouthOn = false;     // hysteresis: off a bit lower
+  $('#mMouth i').style.width = Math.min(100, mouthScore / (thr * 2) * 100) + '%';
+  const micBoost = readMic(sens);                       // mic only adds strength, never triggers fog
+  const faceBlow = mouthOn ? Math.min(1, (mouthScore - thr * 0.8) / 0.25) : 0;
+  const target = faceBlow * (0.75 + 0.25 * micBoost);
   blow = blow * 0.75 + target * 0.25;
-  breath = blow > 0.1 ? Math.min(1, breath + 0.012) : Math.max(0, breath - 0.03);
+  breath = mouthOn ? Math.min(1, breath + 0.012) : Math.max(0, breath - 0.03);
 
   fctx.globalCompositeOperation = 'source-over';
-  if (blow > 0.08) {
-    const p = mouth || { x: W / 2, y: H * 0.55 };
-    puff(p.x, p.y, blow);
-  }
+  if (mouth && mouthOn && blow > 0.05) puff(mouth.x, mouth.y, blow);
   if (frame % 8 === 0) {                           // slow evaporation
     fctx.globalCompositeOperation = 'destination-out';
     fctx.fillStyle = 'rgba(0,0,0,0.006)';
@@ -329,8 +330,6 @@ $('#go').onclick = async () => {
   }
 };
 
-addEventListener('keydown', e => { if (e.code === 'Space') { spaceDown = true; e.preventDefault(); } });
-addEventListener('keyup', e => { if (e.code === 'Space') spaceDown = false; });
 $('#fogAll').onclick = () => { fctx.globalCompositeOperation = 'source-over'; fctx.fillStyle = 'rgba(238,245,255,0.9)'; fctx.fillRect(0, 0, fW, fH); };
 $('#clear').onclick = () => { fctx.clearRect(0, 0, fW, fH); };
 $('#snap').onclick = () => { const a = document.createElement('a'); a.download = 'foggy-glass.png'; a.href = view.toDataURL('image/png'); a.click(); };
