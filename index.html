@@ -66,6 +66,7 @@
     <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
     <symbol id="i-expand" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></symbol>
     <symbol id="i-pen" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+    <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></symbol>
     <symbol id="i-grip" viewBox="0 0 24 24"><path d="M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01" stroke-width="3"/></symbol>
     <symbol id="i-eyeoff" viewBox="0 0 24 24"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><path d="M2 2l20 20"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></symbol>
@@ -95,6 +96,7 @@
   <div class="chip" title="Fog size"><svg class="i"><use href="#i-expand"/></svg><input id="fogW" type="range" min="0" max="100" value="33"></div>
   <div class="chip" title="Pen width"><svg class="i"><use href="#i-pen"/></svg><input id="penW" type="range" min="0" max="100" value="15"></div>
   <div class="sep"></div>
+  <button class="btn" id="handsBtn" title="Tracked hands: 1 or 2" style="width:auto;padding:0 10px;display:flex;align-items:center;gap:4px"><svg class="i"><use href="#i-hand"/></svg><span id="handN" style="font-size:13px;font-weight:500">1</span></button>
   <button class="btn" id="fit" title="Fit / fill camera view"><svg class="i"><use href="#i-scan"/></svg></button>
   <button class="btn" id="recal" title="Recalibrate mouth"><svg class="i"><use href="#i-refresh"/></svg></button>
   <button class="btn" id="fogAll" title="Fog everything"><svg class="i"><use href="#i-cloud"/></svg></button>
@@ -237,29 +239,34 @@ function buildDecor() {
 
 // ---------- models ----------
 let hands = null, face = null, lastHandT = -1, lastFaceT = -1;
-let handInfo = null, mouth = null, pen = null, penLost = 0;
+let mouth = null;
+const newSlot = () => ({ info: null, pen: null, penLost: 0, pts: [], lastMid: null, prevRI: 0 });
+const slots = [newSlot(), newSlot()];                 // one drawing state per hand
+let maxHands = 1;
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
-// Hand pose from finger-extension ratios (fingertip-to-wrist / knuckle-to-wrist).
-// Extended finger ≈ 1.8–2.0, curled finger ≈ 1.0–1.3, so the gap is wide and stable.
-let prevRI = 0;
-function analyzeHand(lm) {
-  const r = (tip, mcp) => dist(lm[tip], lm[0]) / (dist(lm[mcp], lm[0]) || 1);
+// Hand pose from finger-extension ratios (fingertip-to-wrist / knuckle-to-wrist), measured on the
+// model's metric 3D "world" landmarks, so tilting or turning the hand sideways doesn't change them.
+// Extended finger ≈ 1.8–2.0, curled finger ≈ 1.0–1.3.
+const d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
+function analyzeHand(lm, world, sl) {
+  const P = world && world.length >= 21 ? world : lm;
+  const r = (tip, mcp) => d3(P[tip], P[0]) / (d3(P[mcp], P[0]) || 1);
   const rI = r(8, 5), rM = r(12, 9), rR = r(16, 13), rP = r(20, 17);
-  const curling = prevRI > 0 && rI < prevRI - 0.15;       // index is folding right now → stop early
-  prevRI = rI;
+  const curling = sl.prevRI > 0 && rI < sl.prevRI - 0.15;  // index is folding right now → stop early
+  sl.prevRI = rI;
   if (rI > 1.5 && rM > 1.5 && rR > 1.45 && rP > 1.35) return { mode: 'palm', p: toScreen(lm[9]) };
   if (rI > 1.45 && rM < 1.55 && !curling) return { mode: 'write', p: toScreen(lm[8]) };
   return { mode: 'none' };
 }
 
 // ---- mouth: geometry relative to YOUR neutral face (calibrated at start) ----
-let openR = 0, widthR = 0, scoreS = 0, calibrated = false;
-const calib = { active: false, n: 0, open: 0, width: 0 };
-const neutral = { open: 0, width: 0.3 };
+let openR = 0, widthR = 0, aspectR = 0, scoreS = 0, calibrated = false;
+const calib = { active: false, n: 0, open: 0, width: 0, aspect: 0 };
+const neutral = { open: 0, width: 0.3, aspect: 0.4 };
 function startCalibration() {
   calibrated = false; scoreS = 0;
-  calib.active = true; calib.n = 0; calib.open = 0; calib.width = 0;
+  calib.active = true; calib.n = 0; calib.open = 0; calib.width = 0; calib.aspect = 0;
   $('#msg').style.display = 'block';
   $('#msg').textContent = 'Relax your face with a closed mouth for a moment…';
 }
@@ -270,10 +277,11 @@ function readFace(res) {
   const fw = dist(lm[234], lm[454]) || 1;                 // face width (cheek to cheek)
   openR = dist(lm[13], lm[14]) / fw;                      // inner-lip gap
   widthR = dist(lm[61], lm[291]) / fw;                    // mouth-corner width
+  aspectR = dist(lm[0], lm[17]) / (dist(lm[61], lm[291]) || 1);   // outer-lip height / width: grows when pursed
   if (calib.active) {
-    calib.open += openR; calib.width += widthR; calib.n++;
+    calib.open += openR; calib.width += widthR; calib.aspect += aspectR; calib.n++;
     if (calib.n >= 30) {
-      neutral.open = calib.open / calib.n; neutral.width = calib.width / calib.n;
+      neutral.open = calib.open / calib.n; neutral.width = calib.width / calib.n; neutral.aspect = Math.max(0.05, calib.aspect / calib.n);
       calib.active = false; calibrated = true;
       $('#msg').textContent = 'Ready · open your mouth or purse your lips to fog the glass';
       setTimeout(() => $('#msg').style.display = 'none', 4000);
@@ -321,14 +329,12 @@ function puff(x, y, level) {
 let frame = 0, blow = 0, mouthOn = false;
 const sensEl = $('#sens'), meterEl = $('#mMouth i'), penEl = $('#penW'), fogEl = $('#fogW');
 let grainPat = null;
-const pts = [];                                       // confirmed pen points waiting to be drawn
-let lastMid = null;
 const penR = () => 6 + (+penEl.value) * 0.6;          // pen radius in px
 const fogK = () => 0.5 + (+fogEl.value) / 100 * 1.5;  // breath cloud size multiplier
 // Draw a smooth quadratic curve through midpoints (a→b→c), so lines are continuous even
 // when the camera only delivers ~15 hand positions per second.
-function drawCurve(a, b, c) {
-  const m1 = lastMid || a, m2 = { x: (b.x + c.x) / 2, y: (b.y + c.y) / 2 };
+function drawCurve(sl, a, b, c) {
+  const m1 = sl.lastMid || a, m2 = { x: (b.x + c.x) / 2, y: (b.y + c.y) / 2 };
   const write = b.mode === 'write';
   const r = write ? penR() : Math.max(60, W / 14), st = write ? 1 : 0.6;
   const n = Math.max(1, Math.ceil((dist(m1, b) + dist(b, m2)) / Math.max(2, r * 0.3)));
@@ -337,7 +343,7 @@ function drawCurve(a, b, c) {
     stamp((u * u * m1.x + 2 * u * t * b.x + t * t * m2.x) * FS,
           (u * u * m1.y + 2 * u * t * b.y + t * t * m2.y) * FS, r * FS, st);
   }
-  lastMid = m2;
+  sl.lastMid = m2;
 }
 function loop() {
   requestAnimationFrame(loop);
@@ -350,12 +356,20 @@ function loop() {
     lastHandT = video.currentTime;
     try {
       const res = hands.detectForVideo(video, now);
-      if (res.landmarks && res.landmarks[0]) handInfo = analyzeHand(res.landmarks[0]);
-      else { handInfo = null; prevRI = 0; }
+      const seen = [false, false];
+      (res.landmarks || []).forEach((lm, i) => {
+        const h = res.handedness && res.handedness[i] && res.handedness[i][0];
+        let k = maxHands === 1 ? 0 : (h && h.categoryName === 'Left' ? 0 : h && h.categoryName === 'Right' ? 1 : i);
+        if (seen[k]) k = 1 - k;
+        if (maxHands === 1 && k === 1) return;
+        seen[k] = true;
+        slots[k].info = analyzeHand(lm, res.worldLandmarks && res.worldLandmarks[i], slots[k]);
+      });
+      slots.forEach((sl, i) => { if (!seen[i]) { sl.info = null; sl.prevRI = 0; } });
     } catch (e) {}
   }
   // Hands get priority: skip face tracking while writing, so finger tracking stays fast.
-  const handBusy = handInfo && handInfo.mode === 'write';
+  const handBusy = slots.some(sl => sl.info && sl.info.mode === 'write');
   if (face && !handBusy && frame % 2 === 0 && video.currentTime !== lastFaceT) {
     lastFaceT = video.currentTime;
     try { readFace(face.detectForVideo(video, now + 0.01)); } catch (e) {}
@@ -365,8 +379,11 @@ function loop() {
   let score = 0;
   if (calibrated && mouth) {
     const dOpen = 0.07 - sens * 0.05;                   // slider 70% → 0.035 of face width
-    const shrink = 0.22 - sens * 0.12;                  // slider 70% → mouth 14% narrower
-    score = Math.max(0, (openR - neutral.open) / dOpen, (neutral.width - widthR) / (neutral.width * shrink));
+    const shrink = 0.18 - sens * 0.11;                  // slider 70% → mouth ~10% narrower (pursed)
+    const aspUp = 0.45 - sens * 0.3;                    // slider 70% → lips ~24% taller vs width (pursed "oo")
+    score = Math.max(0, (openR - neutral.open) / dOpen,
+                     (neutral.width - widthR) / (neutral.width * shrink),
+                     (aspectR - neutral.aspect) / (neutral.aspect * aspUp));
   }
   scoreS = scoreS * 0.5 + score * 0.5;
   if (!mouth || !calibrated || handBusy) mouthOn = false;
@@ -386,19 +403,22 @@ function loop() {
   }
 
   fctx.globalCompositeOperation = 'destination-out';
-  if (handInfo && handInfo.mode !== 'none') {
-    const t = handInfo.p;
-    penLost = 0;
-    // adaptive smoothing: steady when slow, almost raw when fast
-    const speed = pen ? dist(t, pen) : 0;
-    const a = Math.min(1, 0.55 + speed / 30);
-    const sm = pen ? { x: pen.x + (t.x - pen.x) * a, y: pen.y + (t.y - pen.y) * a } : t;
-    pts.push({ x: sm.x, y: sm.y, mode: handInfo.mode });
-    pen = sm;
-    // 2-point delay: the moment the finger folds is never drawn (no tail after you stop)
-    while (pts.length >= 3) { drawCurve(pts[0], pts[1], pts[2]); pts.shift(); }
-  } else if (++penLost > 2) {                          // 1-2 frame dropouts keep the line going
-    pts.length = 0; pen = null; lastMid = null;        // real stop: drop unconfirmed points, end stroke
+  for (const sl of slots) {
+    const info = sl.info;
+    if (info && info.mode !== 'none') {
+      const t = info.p;
+      sl.penLost = 0;
+      // adaptive smoothing: steady when slow, almost raw when fast
+      const speed = sl.pen ? dist(t, sl.pen) : 0;
+      const a = Math.min(1, 0.55 + speed / 30);
+      const sm = sl.pen ? { x: sl.pen.x + (t.x - sl.pen.x) * a, y: sl.pen.y + (t.y - sl.pen.y) * a } : t;
+      sl.pts.push({ x: sm.x, y: sm.y, mode: info.mode });
+      sl.pen = sm;
+      // 2-point delay: the moment the finger folds is never drawn (no tail after you stop)
+      while (sl.pts.length >= 3) { drawCurve(sl, sl.pts[0], sl.pts[1], sl.pts[2]); sl.pts.shift(); }
+    } else if (++sl.penLost > 2) {                     // 1-2 frame dropouts keep the line going
+      sl.pts.length = 0; sl.pen = null; sl.lastMid = null;   // real stop: end stroke
+    }
   }
   fctx.globalCompositeOperation = 'source-over';
 
@@ -418,11 +438,14 @@ function loop() {
   tctx.drawImage(fog, 0, 0);
   { const R = videoRect(); vctx.save(); vctx.beginPath(); vctx.rect(R.x, R.y, R.w, R.h); vctx.clip(); vctx.drawImage(tmp, 0, 0, W, H); vctx.restore(); }
 
-  if (handInfo && handInfo.mode !== 'none') {
-    vctx.strokeStyle = 'rgba(255,255,255,.8)'; vctx.lineWidth = 1.5;
-    vctx.beginPath();
-    vctx.arc(handInfo.p.x, handInfo.p.y, handInfo.mode === 'write' ? penR() : Math.max(60, W / 14), 0, Math.PI * 2);
-    vctx.stroke();
+  for (const sl of slots) {
+    const info = sl.info;
+    if (info && info.mode !== 'none') {
+      vctx.strokeStyle = 'rgba(255,255,255,.8)'; vctx.lineWidth = 1.5;
+      vctx.beginPath();
+      vctx.arc(info.p.x, info.p.y, info.mode === 'write' ? penR() : Math.max(60, W / 14), 0, Math.PI * 2);
+      vctx.stroke();
+    }
   }
 }
 
@@ -466,6 +489,12 @@ $('#go').onclick = async () => {
 };
 
 $('#recal').onclick = startCalibration;
+$('#handsBtn').onclick = () => {
+  maxHands = maxHands === 1 ? 2 : 1;
+  $('#handN').textContent = maxHands;
+  try { if (hands) hands.setOptions({ numHands: maxHands }); } catch (e) { console.warn(e); }
+  for (const sl of slots) { sl.info = null; sl.pts.length = 0; sl.pen = null; sl.lastMid = null; sl.prevRI = 0; }
+};
 // ---- hide / move the control panel ----
 const hud = $('#hud'), showBtn = $('#show'), grip = $('#grip');
 let hudHidden = false;
