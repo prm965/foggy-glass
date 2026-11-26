@@ -59,7 +59,8 @@
     <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></symbol>
     <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
     <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
-    <symbol id="i-eraser" viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7M5 11l9 9"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="i-eraser"viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7M5 11l9 9"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
   </defs>
 </svg>
@@ -76,9 +77,9 @@
 
 <div id="hud" style="display:none">
   <div class="chip" title="Breath"><svg class="i"><use href="#i-wind"/></svg><div class="meter" id="mMouth"><i></i></div></div>
-  <div class="chip" title="Microphone (adds strength)"><svg class="i"><use href="#i-mic"/></svg><div class="meter" id="mMic"><i></i></div></div>
-  <div class="chip" title="Sensitivity"><svg class="i"><use href="#i-sliders"/></svg><input id="sens" type="range" min="0" max="100" value="60"></div>
+  <div class="chip" title="Sensitivity"><svg class="i"><use href="#i-sliders"/></svg><input id="sens" type="range" min="0" max="100" value="70"></div>
   <div class="sep"></div>
+  <button class="btn" id="recal" title="Recalibrate mouth"><svg class="i"><use href="#i-refresh"/></svg></button>
   <button class="btn" id="fogAll" title="Fog everything"><svg class="i"><use href="#i-cloud"/></svg></button>
   <button class="btn" id="clear" title="Clear glass"><svg class="i"><use href="#i-eraser"/></svg></button>
   <button class="btn" id="snap" title="Save image"><svg class="i"><use href="#i-download"/></svg></button>
@@ -135,50 +136,50 @@ function toScreen(lm) {
   return { x: W - (ox + lm.x * vw * s), y: oy + lm.y * vh * s };
 }
 
-// ---------- audio ----------
-let analyser, audioBuf, baseline = 0.01, baseFrames = 0, spaceDown = false;
-async function setupAudio(stream) {
-  if (!stream.getAudioTracks().length) return;
-  const ac = new (window.AudioContext || window.webkitAudioContext)();
-  if (ac.state === 'suspended') await ac.resume();
-  const src = ac.createMediaStreamSource(stream);
-  analyser = ac.createAnalyser(); analyser.fftSize = 1024;
-  src.connect(analyser);
-  audioBuf = new Float32Array(analyser.fftSize);
-}
-function readMic(sens) {
-  if (!analyser) return 0;
-  analyser.getFloatTimeDomainData(audioBuf);
-  let sum = 0; for (const v of audioBuf) sum += v * v;
-  const rms = Math.sqrt(sum / audioBuf.length);
-  if (baseFrames < 60) { baseline = Math.max(baseline * 0.9 + rms * 0.1, 0.002); baseFrames++; return 0; }
-  const thr = baseline * (6 - sens * 4.2) + 0.004;
-  $('#mMic i').style.width = Math.min(100, rms / (thr * 2) * 100) + '%';
-  return Math.max(0, Math.min(1, (rms - thr) / (thr * 1.5)));
-}
-
 // ---------- models ----------
 let hands = null, face = null, lastHandT = -1, lastFaceT = -1;
-let handInfo = null, mouth = null, mouthScore = 0, pen = null;
+let handInfo = null, mouth = null, pen = null, penLost = 0;
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
+// Hand pose from finger-extension ratios (fingertip-to-wrist / knuckle-to-wrist).
+// Extended finger ≈ 1.8–2.0, curled finger ≈ 1.0–1.3, so the gap is wide and stable.
+let prevRI = 0;
 function analyzeHand(lm) {
-  const ext = (tip, pip) => dist(lm[tip], lm[0]) > dist(lm[pip], lm[0]) * 1.05;
-  const idx = ext(8, 6), mid = ext(12, 10), ring = ext(16, 14), pky = ext(20, 18);
-  if (idx && mid && ring && pky) return { mode: 'palm', p: toScreen(lm[9]) };
-  if (idx && !mid) return { mode: 'write', p: toScreen(lm[8]) };
+  const r = (tip, mcp) => dist(lm[tip], lm[0]) / (dist(lm[mcp], lm[0]) || 1);
+  const rI = r(8, 5), rM = r(12, 9), rR = r(16, 13), rP = r(20, 17);
+  const curling = prevRI > 0 && rI < prevRI - 0.15;       // index is folding right now → stop early
+  prevRI = rI;
+  if (rI > 1.5 && rM > 1.5 && rR > 1.45 && rP > 1.35) return { mode: 'palm', p: toScreen(lm[9]) };
+  if (rI > 1.45 && rM < 1.55 && !curling) return { mode: 'write', p: toScreen(lm[8]) };
   return { mode: 'none' };
 }
 
+// ---- mouth: geometry relative to YOUR neutral face (calibrated at start) ----
+let openR = 0, widthR = 0, scoreS = 0, calibrated = false;
+const calib = { active: false, n: 0, open: 0, width: 0 };
+const neutral = { open: 0, width: 0.3 };
+function startCalibration() {
+  calibrated = false; scoreS = 0;
+  calib.active = true; calib.n = 0; calib.open = 0; calib.width = 0;
+  $('#msg').style.display = 'block';
+  $('#msg').textContent = 'Relax your face with a closed mouth for a moment…';
+}
 function readFace(res) {
-  if (!res.faceLandmarks || !res.faceLandmarks[0]) { mouth = null; mouthScore = 0; return; }
+  if (!res.faceLandmarks || !res.faceLandmarks[0]) { mouth = null; return; }
   const lm = res.faceLandmarks[0];
   mouth = toScreen({ x: (lm[13].x + lm[14].x) / 2, y: (lm[13].y + lm[14].y) / 2 });
-  const bs = {};
-  const cats = res.faceBlendshapes && res.faceBlendshapes[0] ? res.faceBlendshapes[0].categories : [];
-  for (const c of cats) bs[c.categoryName] = c.score;
-  // breath pose: pursed lips, round "o", puffed cheeks, or open mouth ("haaa")
-  mouthScore = Math.max(bs.mouthPucker || 0, (bs.mouthFunnel || 0) * 0.95, (bs.cheekPuff || 0) * 1.1, (bs.jawOpen || 0) * 0.9);
+  const fw = dist(lm[234], lm[454]) || 1;                 // face width (cheek to cheek)
+  openR = dist(lm[13], lm[14]) / fw;                      // inner-lip gap
+  widthR = dist(lm[61], lm[291]) / fw;                    // mouth-corner width
+  if (calib.active) {
+    calib.open += openR; calib.width += widthR; calib.n++;
+    if (calib.n >= 30) {
+      neutral.open = calib.open / calib.n; neutral.width = calib.width / calib.n;
+      calib.active = false; calibrated = true;
+      $('#msg').textContent = 'Ready · open your mouth or purse your lips to fog the glass';
+      setTimeout(() => $('#msg').style.display = 'none', 4000);
+    }
+  }
 }
 
 // ---------- fog ----------
@@ -219,34 +220,48 @@ function puff(x, y, level) {
 
 // ---------- main loop ----------
 let frame = 0, blow = 0, mouthOn = false;
+const segQ = [];
+const sensEl = $('#sens'), meterEl = $('#mMouth i');
+let grainPat = null;
+function drawSeg(s) {
+  if (s.mode === 'write') wipeLine(s.a, s.b, Math.max(14, W / 70), 1);
+  else wipeLine(s.a, s.b, Math.max(60, W / 14), 0.6);
+}
 function loop() {
   requestAnimationFrame(loop);
   if (video.readyState < 2) return;
   frame++;
   const now = performance.now();
-  const sens = +$('#sens').value / 100;
+  const sens = +sensEl.value / 100;
 
   if (hands && video.currentTime !== lastHandT) {
     lastHandT = video.currentTime;
     try {
       const res = hands.detectForVideo(video, now);
-      handInfo = res.landmarks && res.landmarks[0] ? analyzeHand(res.landmarks[0]) : null;
+      if (res.landmarks && res.landmarks[0]) handInfo = analyzeHand(res.landmarks[0]);
+      else { handInfo = null; prevRI = 0; }
     } catch (e) {}
   }
-  if (face && frame % 3 === 0 && video.currentTime !== lastFaceT) {
+  // Hands get priority: skip face tracking while writing, so finger tracking stays fast.
+  const handBusy = handInfo && handInfo.mode === 'write';
+  if (face && !handBusy && frame % 2 === 0 && video.currentTime !== lastFaceT) {
     lastFaceT = video.currentTime;
     try { readFace(face.detectForVideo(video, now + 0.01)); } catch (e) {}
   }
 
-  // Fog only when a face is found AND the mouth is open or pursed.
-  const thr = 0.6 - sens * 0.4;                         // slider 60% → 0.36
-  if (!mouth) mouthOn = false;
-  else if (!mouthOn && mouthScore > thr) mouthOn = true;           // turn on above threshold
-  else if (mouthOn && mouthScore < thr * 0.8) mouthOn = false;     // hysteresis: off a bit lower
-  $('#mMouth i').style.width = Math.min(100, mouthScore / (thr * 2) * 100) + '%';
-  const micBoost = readMic(sens);                       // mic only adds strength, never triggers fog
-  const faceBlow = mouthOn ? Math.min(1, (mouthScore - thr * 0.8) / 0.25) : 0;
-  const target = faceBlow * (0.75 + 0.25 * micBoost);
+  // Score 1.0 = threshold. Open mouth: lip gap grows past neutral. Pursed: mouth width shrinks below neutral.
+  let score = 0;
+  if (calibrated && mouth) {
+    const dOpen = 0.07 - sens * 0.05;                   // slider 70% → 0.035 of face width
+    const shrink = 0.22 - sens * 0.12;                  // slider 70% → mouth 14% narrower
+    score = Math.max(0, (openR - neutral.open) / dOpen, (neutral.width - widthR) / (neutral.width * shrink));
+  }
+  scoreS = scoreS * 0.5 + score * 0.5;
+  if (!mouth || !calibrated || handBusy) mouthOn = false;
+  else if (!mouthOn && scoreS >= 1) mouthOn = true;      // on at threshold
+  else if (mouthOn && scoreS < 0.7) mouthOn = false;     // hysteresis: off a bit lower
+  meterEl.style.width = Math.min(100, scoreS / 1.5 * 100) + '%';
+  const target = mouthOn ? Math.min(1, (scoreS - 0.7) / 0.8) : 0;
   blow = blow * 0.75 + target * 0.25;
   breath = mouthOn ? Math.min(1, breath + 0.012) : Math.max(0, breath - 0.03);
 
@@ -261,11 +276,20 @@ function loop() {
   fctx.globalCompositeOperation = 'destination-out';
   if (handInfo && handInfo.mode !== 'none') {
     const t = handInfo.p;
-    const sm = pen ? { x: pen.x + (t.x - pen.x) * 0.8, y: pen.y + (t.y - pen.y) * 0.8 } : t;
-    if (handInfo.mode === 'write') wipeLine(pen || sm, sm, Math.max(14, W / 70), 1);
-    else wipeLine(pen || sm, sm, Math.max(60, W / 14), 0.6);
+    penLost = 0;
+    // adaptive smoothing: steady when slow, almost raw when fast
+    const speed = pen ? dist(t, pen) : 0;
+    const a = Math.min(1, 0.55 + speed / 30);
+    const sm = pen ? { x: pen.x + (t.x - pen.x) * a, y: pen.y + (t.y - pen.y) * a } : t;
+    segQ.push({ a: pen || sm, b: sm, mode: handInfo.mode });
+    // hold the last 2 segments until the pose is confirmed again, so the moment the
+    // finger folds is never drawn (no tail after you stop writing)
+    while (segQ.length > 2) drawSeg(segQ.shift());
     pen = sm;
-  } else pen = null;
+  } else {
+    segQ.length = 0;                                   // pose ended: drop unconfirmed segments
+    if (++penLost > 3) pen = null;                     // brief dropouts don't break the line
+  }
   fctx.globalCompositeOperation = 'source-over';
 
   drawVideo(vctx, W, H);
@@ -276,7 +300,8 @@ function loop() {
   tctx.drawImage(small, 0, 0, fW, fH);
   tctx.fillStyle = 'rgba(236,244,255,0.62)';
   tctx.fillRect(0, 0, fW, fH);
-  tctx.fillStyle = tctx.createPattern(grain, 'repeat');
+  if (!grainPat) grainPat = tctx.createPattern(grain, 'repeat');
+  tctx.fillStyle = grainPat;
   tctx.fillRect(0, 0, fW, fH);
   tctx.globalCompositeOperation = 'destination-in';
   tctx.drawImage(fog, 0, 0);
@@ -301,9 +326,9 @@ async function makeModels() {
     }
     return null;
   };
-  hands = await mk(HandLandmarker, "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", { numHands: 1 });
+  hands = await mk(HandLandmarker, "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", { numHands: 1, minHandDetectionConfidence: 0.4, minHandPresenceConfidence: 0.4, minTrackingConfidence: 0.4 });
   $('#msg').textContent = 'Hand tracking ready · loading face tracking…';
-  face = await mk(FaceLandmarker, "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", { numFaces: 1, outputFaceBlendshapes: true });
+  face = await mk(FaceLandmarker, "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", { numFaces: 1, outputFaceBlendshapes: false });
 }
 
 $('#go').onclick = async () => {
@@ -311,25 +336,24 @@ $('#go').onclick = async () => {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-    }).catch(() => navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } }));
+      audio: false
+    });
     video.srcObject = stream;
     await video.play();
-    await setupAudio(stream).catch(console.warn);
     $('#start').style.display = 'none';
     $('#hud').style.display = 'flex';
     $('#msg').style.display = 'block';
     loop();
     await makeModels();
-    $('#msg').textContent = 'Breathe on the glass · point to write · open palm to wipe';
-    setTimeout(() => $('#msg').style.display = 'none', 7000);
+    startCalibration();
   } catch (e) {
     $('#start').style.display = 'flex';
-    $('#err').textContent = 'Could not start: ' + e.message + ' (needs https and camera/mic access)';
+    $('#err').textContent = 'Could not start: ' + e.message + ' (needs https and camera access)';
     console.error(e);
   }
 };
 
+$('#recal').onclick = startCalibration;
 $('#fogAll').onclick = () => { fctx.globalCompositeOperation = 'source-over'; fctx.fillStyle = 'rgba(238,245,255,0.9)'; fctx.fillRect(0, 0, fW, fH); };
 $('#clear').onclick = () => { fctx.clearRect(0, 0, fW, fH); };
 $('#snap').onclick = () => { const a = document.createElement('a'); a.download = 'foggy-glass.png'; a.href = view.toDataURL('image/png'); a.click(); };
